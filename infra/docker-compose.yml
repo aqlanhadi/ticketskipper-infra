@@ -1,0 +1,126 @@
+name: fleet-telemetry
+
+services:
+  kafka:
+    image: apache/kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - appnet
+
+  telemetry:
+    image: tesla/fleet-telemetry:v0.7.2
+    depends_on:
+      kafka:
+        condition: service_healthy
+    expose:
+      - "443"
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+      - ./telemetry/config.json:/etc/fleet-telemetry/config.json:ro
+    networks:
+      - appnet
+
+  kafka-to-supabase:
+    build:
+      context: ../kafka-to-supabase
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      telemetry:
+        condition: service_started
+    env_file:
+      - ./kafka-to-supabase/.env
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_TOPIC=telemetry_V
+      - KAFKA_GROUP_ID=kafka-to-supabase
+      - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
+      - SUPABASE_TABLE=${SUPABASE_TABLE:-tesla_v_events}
+    networks:
+      - appnet
+
+  tesla_http_proxy:
+    image: tesla/vehicle-command:latest
+    user: "1000:1000"
+    expose:
+      - "4443"
+    environment:
+      - TESLA_HTTP_PROXY_TLS_CERT=/etc/letsencrypt/live/vehicle-proxy.ticketskipper.com/fullchain.pem
+      - TESLA_HTTP_PROXY_TLS_KEY=/etc/letsencrypt/live/vehicle-proxy.ticketskipper.com/privkey.pem
+      - TESLA_HTTP_PROXY_HOST=0.0.0.0
+      - TESLA_HTTP_PROXY_PORT=4443
+      - TESLA_HTTP_PROXY_TIMEOUT=10s
+      - TESLA_KEY_FILE=/config/fleet-key.pem
+      - TESLA_VERBOSE=true
+    volumes:
+      - ./vehicle-proxy/fleet-key.pem:/config/fleet-key.pem:ro
+      - letsencrypt:/etc/letsencrypt:ro
+    networks:
+      - appnet
+
+  nginx:
+    image: nginx:1.26-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - telemetry
+      - tesla_http_proxy
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/stream.d:/etc/nginx/stream.d:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    command: >
+      /bin/sh -c "apk add --no-cache inotify-tools >/dev/null 2>&1 &&
+      mkdir -p /etc/letsencrypt/live/vehicle-proxy.ticketskipper.com /etc/letsencrypt/live/fleet-telemetry.ticketskipper.com &&
+      inotifywait -m -e close_write,create,delete /etc/letsencrypt/live/vehicle-proxy.ticketskipper.com /etc/letsencrypt/live/fleet-telemetry.ticketskipper.com |
+      while read path action file; do
+        echo \"[nginx] certificate change detected: $path$file\";
+        nginx -s reload;
+      done &
+      nginx -g 'daemon off;'"
+    networks:
+      - appnet
+
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+      - ./certbot/hooks:/etc/letsencrypt/renewal-hooks/deploy
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - CERTBOT_EMAIL=${CERTBOT_EMAIL}
+      - CERTBOT_DOMAINS=fleet-telemetry.ticketskipper.com,vehicle-proxy.ticketskipper.com
+    entrypoint: sh
+    command: -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh --quiet --agree-tos --email ${CERTBOT_EMAIL:-admin@example.com}; sleep 12h; done"
+    networks:
+      - appnet
+
+networks:
+  appnet:
+
+volumes:
+  letsencrypt:
+  certbot-www:
+
