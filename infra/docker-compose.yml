@@ -59,12 +59,11 @@ services:
 
   tesla_http_proxy:
     image: tesla/vehicle-command:latest
-    user: "1000:1000"
     expose:
       - "4443"
     environment:
-      - TESLA_HTTP_PROXY_TLS_CERT=/etc/letsencrypt/live/vehicle-proxy.ticketskipper.com/fullchain.pem
-      - TESLA_HTTP_PROXY_TLS_KEY=/etc/letsencrypt/live/vehicle-proxy.ticketskipper.com/privkey.pem
+      - TESLA_HTTP_PROXY_TLS_CERT=/etc/letsencrypt/live/fleet-telemetry.ticketskipper.com/fullchain.pem
+      - TESLA_HTTP_PROXY_TLS_KEY=/etc/letsencrypt/live/fleet-telemetry.ticketskipper.com/privkey.pem
       - TESLA_HTTP_PROXY_HOST=0.0.0.0
       - TESLA_HTTP_PROXY_PORT=4443
       - TESLA_HTTP_PROXY_TIMEOUT=10s
@@ -92,7 +91,7 @@ services:
       - certbot-www:/var/www/certbot:ro
     command: >
       /bin/sh -c "apk add --no-cache inotify-tools >/dev/null 2>&1 &&
-      inotifywait -m -e close_write,create,delete /etc/letsencrypt/live/vehicle-proxy.ticketskipper.com /etc/letsencrypt/live/fleet-telemetry.ticketskipper.com 2>/dev/null |
+      inotifywait -m -e close_write,create,delete /etc/letsencrypt/live 2>/dev/null |
       while read path action file; do
         echo \"[nginx] certificate change detected: $path$file\";
         nginx -s reload;
